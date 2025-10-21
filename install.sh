@@ -1,9 +1,16 @@
 #!/bin/bash
 # =========================================================
-# Author: Zynex Cloud AI
+# 🔥 VPS FIRE+ + DDoS SHIELD for Debian 11
+# Author: Zynex Cloud AI (Powered by GPT-5)
 # Version: 4.0 (Next-Gen Defense)
-# =========================================================
+# _____  __     __  _   _   ____  __   _   __
+ |___  / \ \   / / | \ | | |  ____| \ \ / /
+    / /   \ \_/ /  |  \| | | |__     \ V / 
+   / /     \   /   | . ` | |  __|     > <  
+  / /__     | |    | |\  | | |____   / . \ 
+ /_____|    |_|    |_| \_| |______| /_/ \_\
 
+ 
 echo ">>> 🧠 Initializing VPS FIRE+ Defense Engine..."
 
 # --- Basic system update ---
