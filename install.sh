@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# 🚀 Ultra-Optimized Debian 11 IPv6 VPS Setup Script (FULL)
-# Focus: Low-latency Minecraft, Pterodactyl Wings, Docker
-# Includes: Firewall, DDoS protection, CPU/memory tuning, THP disable, irqbalance, tuned, fq_codel, NIC tuning
-# IPv6-only compatible, safe with IPv4 present
+# 🚀 Ultra-Optimized Debian 11 IPv6 VPS Setup Script (FULL, fixed)
+# Purpose: Low-latency Minecraft, Pterodactyl Wings, Docker
+# Includes: Firewall, DDoS mitigations, CPU/memory tuning, THP disable, irqbalance, tuned, fq_codel, NIC tuning
+# Compatible with IPv6; safe with IPv4 present
 # Final banner: "VPS FIRE+ + DDoS SHIELD Active! Powered by Zynex Cloud"
 
 set -euo pipefail
@@ -16,7 +16,7 @@ fi
 log() { echo -e "👉 $1"; }
 
 # -----------------------------
-# 0) Basic info
+# 0) Basic check
 # -----------------------------
 if ! grep -qi "Debian GNU/Linux 11" /etc/os-release; then
   echo "⚠️ This script targets Debian 11 (Bullseye). Continuing anyway..."
@@ -33,7 +33,7 @@ apt-get install -y \
   curl wget unzip zip git screen htop net-tools neofetch iftop iotop nload bmon \
   build-essential ca-certificates gnupg lsb-release ethtool ufw fail2ban dialog \
   lsof jq iptables-persistent cpufrequtils irqbalance haveged mlocate bc sysstat \
-  tuned numactl cpuid netdata atop
+  tuned numactl cpuid netdata atop tcptraceroute iproute2
 
 timedatectl set-timezone UTC || true
 hostnamectl set-hostname optimized-vps || true
@@ -47,9 +47,11 @@ echo 'GOVERNOR="performance"' > /etc/default/cpufrequtils
 systemctl enable --now cpufrequtils || true
 systemctl enable --now irqbalance || true
 
-# Immediate governor set (best effort)
+# Apply performance governor immediately (best effort)
 for gov in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
-  echo performance > "$gov" 2>/dev/null || true
+  if [[ -w "$gov" ]]; then
+    echo performance > "$gov" || true
+  fi
 done
 
 # -----------------------------
@@ -137,8 +139,8 @@ Description=Disable Transparent Huge Pages
 After=sysinit.target local-fs.target
 [Service]
 Type=oneshot
-ExecStart=/bin/bash -c "echo never > /sys/kernel/mm/transparent_hugepage/enabled"
-ExecStart=/bin/bash -c "echo never > /sys/kernel/mm/transparent_hugepage/defrag"
+ExecStart=/bin/bash -c "echo never > /sys/kernel/mm/transparent_hugepage/enabled || true"
+ExecStart=/bin/bash -c "echo never > /sys/kernel/mm/transparent_hugepage/defrag || true"
 [Install]
 WantedBy=multi-user.target
 EOF
@@ -153,47 +155,50 @@ systemctl enable --now tuned || true
 tuned-adm profile latency-performance || true
 
 # -----------------------------
-# 7) fq_codel service
+# 7) fq_codel helper + service (fixed)
 # -----------------------------
-log "🌊 Creating fq_codel service..."
+log "🌊 Creating fq_codel helper and service..."
 cat > /usr/local/bin/apply-fqcodel.sh <<'EOS'
 #!/bin/bash
-IFACES=$(ip -o link show | awk -F": " "{print \$2}" | grep -vE "lo|docker|veth|br-|virbr|vmnet|tap|tun")
+# Apply fq_codel to all non-virtual interfaces
+IFACES=$(ip -o link show | awk -F": " '{print $2}' | grep -vE "lo|docker|veth|br-|virbr|vmnet|tap|tun")
 for IFACE in $IFACES; do
-  tc qdisc replace dev "$IFACE" root fq_codel || true
+  tc qdisc replace dev "$IFACE" root fq_codel 2>/dev/null || true
 done
 EOS
-chmod +x /usr/local/bin/apply-fqcodel.sh
+chmod 755 /usr/local/bin/apply-fqcodel.sh
 
 cat > /etc/systemd/system/qdisc-fqcodel.service <<'EOF'
 [Unit]
 Description=Apply fq_codel qdisc to interfaces
 After=network-online.target
 Wants=network-online.target
+
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/apply-fqcodel.sh
+
 [Install]
 WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable --now qdisc-fqcodel.service
+systemctl enable --now qdisc-fqcodel.service || true
 
 # -----------------------------
 # 8) Firewall & Fail2Ban
 # -----------------------------
 log "🛡️ Configuring UFW firewall..."
-sed -i 's/^IPV6=.*/IPV6=yes/' /etc/default/ufw
+sed -i 's/^IPV6=.*/IPV6=yes/' /etc/default/ufw || true
 ufw --force reset
 ufw default deny incoming
 ufw default allow outgoing
-ufw allow 22/tcp    comment 'SSH'
-ufw allow 80/tcp    comment 'HTTP'
-ufw allow 443/tcp   comment 'HTTPS'
-ufw allow 8080/tcp  comment 'Wings/Dashboard'
-ufw allow 25565/tcp comment 'Minecraft TCP'
-ufw allow 25565/udp comment 'Minecraft UDP'
+ufw allow 22/tcp
+ufw allow 80/tcp
+ufw allow 443/tcp
+ufw allow 8080/tcp
+ufw allow 25565/tcp
+ufw allow 25565/udp
 ufw --force enable
 
 log "🚨 Configuring Fail2Ban..."
@@ -210,11 +215,6 @@ port = ssh
 filter = sshd
 logpath = /var/log/auth.log
 backend = systemd
-
-[nginx-http-auth]
-enabled = true
-port = http,https
-logpath = /var/log/nginx/error.log
 EOF
 systemctl enable --now fail2ban
 
@@ -235,24 +235,23 @@ ip6tables -A INPUT -p tcp -m multiport --dports 22,80,443,8080 -j ACCEPT
 ip6tables -A INPUT -p udp --dport 25565 -m limit --limit 300/second --limit-burst 600 -j ACCEPT
 ip6tables -A INPUT -m conntrack --ctstate INVALID -j DROP
 
-ip6tables-save > /etc/iptables/rules.v6
+ip6tables-save > /etc/iptables/rules.v6 || true
 
-# Minimal IPv4 persistence so IPv4 won’t break if present (UFW manages v4 policy)
+# Minimal IPv4 persistence (UFW manages IPv4 runtime)
 iptables -F || true
 iptables -X || true
 iptables -P INPUT ACCEPT
 iptables -P FORWARD ACCEPT
 iptables -P OUTPUT ACCEPT
-iptables-save > /etc/iptables/rules.v4
+iptables-save > /etc/iptables/rules.v4 || true
 
 systemctl enable --now netfilter-persistent || true
 
 # -----------------------------
-# 10) Docker (install & optimize)
+# 10) Docker (install & optimize) - COMPLETE
 # -----------------------------
 log "🐳 Installing and optimizing Docker..."
 
-# Install Docker repo & packages if not present
 if ! command -v docker >/dev/null 2>&1; then
   install -m 0755 -d /etc/apt/keyrings
   curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
@@ -262,7 +261,11 @@ if ! command -v docker >/dev/null 2>&1; then
   apt-get install -y docker-ce docker-ce-cli containerd.io
 fi
 
-# Docker daemon optimization (IPv6-ready, log rotation)
+# Ensure containerd and docker services enabled and running
+systemctl enable --now containerd || true
+systemctl enable --now docker || true
+
+# Write optimized daemon config
 mkdir -p /etc/docker
 cat > /etc/docker/daemon.json <<'EOF'
 {
@@ -277,7 +280,8 @@ cat > /etc/docker/daemon.json <<'EOF'
 }
 EOF
 
-systemctl enable --now docker
+# Restart docker to apply settings
+systemctl daemon-reload
 systemctl restart docker || true
 
 # -----------------------------
@@ -294,41 +298,48 @@ root hard nofile 1048576
 EOF
 
 for pam_file in /etc/pam.d/common-session /etc/pam.d/common-session-noninteractive; do
-  if ! grep -q "pam_limits.so" "$pam_file"; then
+  if [[ -f "$pam_file" ]] && ! grep -q "pam_limits.so" "$pam_file"; then
     echo "session required pam_limits.so" >> "$pam_file"
   fi
 done
 
 # -----------------------------
-# 12) NIC tuning (queues & offloads)
+# 12) NIC tuning (helper + service) - FIXED
 # -----------------------------
-log "🧩 Creating NIC tuning service (queues/offloads)..."
+log "🧩 Creating NIC tuning helper and service..."
+cat > /usr/local/bin/nic-tuning.sh <<'EOS'
+#!/bin/bash
+# NIC tuning helper: set txqueuelen, adjust rings, disable offloads
+IFACES=$(ip -o link show | awk -F": " '{print $2}' | grep -vE "lo|docker|veth|br-|virbr|vmnet|tap|tun")
+for IFACE in $IFACES; do
+  ip link set "$IFACE" txqueuelen 10000 2>/dev/null || true
+  ethtool -G "$IFACE" rx 4096 tx 4096 2>/dev/null || true
+  ethtool -K "$IFACE" tso off gso off gro off lro off 2>/dev/null || true
+done
+EOS
+chmod 755 /usr/local/bin/nic-tuning.sh
+
 cat > /etc/systemd/system/nic-tuning.service <<'EOF'
 [Unit]
 Description=NIC tuning (queues & offloads)
 After=network-online.target
 Wants=network-online.target
+
 [Service]
 Type=oneshot
-ExecStart=/bin/bash -c '
-IFACES=$(ip -o link show | awk -F": " "{print \$2}" | grep -vE "lo|docker|veth|br-|virbr|vmnet|tap|tun");
-for IFACE in $IFACES; do
-  ip link set "$IFACE" txqueuelen 10000 || true
-  ethtool -G "$IFACE" rx 4096 tx 4096 2>/dev/null || true
-  ethtool -K "$IFACE" tso off gso off gro off lro off 2>/dev/null || true
-done
-'
+ExecStart=/usr/local/bin/nic-tuning.sh
+
 [Install]
 WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable --now nic-tuning.service
+systemctl enable --now nic-tuning.service || true
 
 # -----------------------------
-# 13) Minecraft low-ping ops tips (comments)
+# 13) Minecraft notes (comments)
 # -----------------------------
-# 💡 JVM flags (Aikar recommended), example for 4G allocation:
+# JVM Aikar flags example (adjust Xms/Xmx to your server RAM):
 # java -Xms4G -Xmx4G -XX:+UseG1GC -XX:+ParallelRefProcEnabled \
 # -XX:MaxGCPauseMillis=200 -XX:+UnlockExperimentalVMOptions \
 # -XX:+DisableExplicitGC -XX:+AlwaysPreTouch -XX:G1NewSizePercent=30 \
@@ -337,16 +348,19 @@ systemctl enable --now nic-tuning.service
 # -XX:G1MixedGCCountTarget=4 -XX:InitiatingHeapOccupancyPercent=15 \
 # -XX:G1MixedGCLiveThresholdPercent=90 -XX:G1RSetUpdatingPauseTimePercent=5 \
 # -XX:SurvivorRatio=32 -XX:+PerfDisableSharedMem -XX:MaxTenuringThreshold=1 \
-# -Dusing.aikars.flags=https://mcflags.emc.gs -Daikars.new.flags=true \
 # -jar server.jar nogui
-# 🔭 View-distance: 8–10 (survival), 6–8 (large player counts)
-# 🌐 IPv6 ready via sysctl forwarding + ip6tables rules
-# 🛡️ UDP rate limiting for 25565 applied to reduce flood impact
 
 # -----------------------------
-# 14) Finishing touches
+# 14) Final checks and banner
 # -----------------------------
 log "🧹 Finalizing setup..."
+# small verification prints (non-fatal)
+echo "Kernel TCP congestion control: $(cat /proc/sys/net/ipv4/tcp_congestion_control 2>/dev/null || echo unknown)"
+echo "Default qdisc on interfaces (tc -s qdisc show):"
+tc -s qdisc show || true
+echo "Transparent Huge Pages:"
+cat /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null || echo "unknown"
+
 clear || true
 neofetch || true
 
