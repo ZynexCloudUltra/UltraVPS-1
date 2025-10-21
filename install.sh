@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# 🚀 Ultra-Optimized Debian 11 IPv6 VPS Setup Script (FULL MODE)
+# 🚀 Ultra-Optimized Debian 11 IPv6 VPS Setup Script (FULL)
 # Focus: Low-latency Minecraft, Pterodactyl Wings, Docker
 # Includes: Firewall, DDoS protection, CPU/memory tuning, THP disable, irqbalance, tuned, fq_codel, NIC tuning
-# Compatibility: IPv6-only ready, safe with IPv4 present
-# Final message: "VPS FIRE+ + DDoS SHIELD Active! Powered by Zynex Cloud"
+# IPv6-only compatible, safe with IPv4 present
+# Final banner: "VPS FIRE+ + DDoS SHIELD Active! Powered by Zynex Cloud"
 
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
@@ -16,7 +16,7 @@ fi
 log() { echo -e "👉 $1"; }
 
 # -----------------------------
-# 0) Basic checks
+# 0) Basic info
 # -----------------------------
 if ! grep -qi "Debian GNU/Linux 11" /etc/os-release; then
   echo "⚠️ This script targets Debian 11 (Bullseye). Continuing anyway..."
@@ -47,6 +47,11 @@ echo 'GOVERNOR="performance"' > /etc/default/cpufrequtils
 systemctl enable --now cpufrequtils || true
 systemctl enable --now irqbalance || true
 
+# Immediate governor set (best effort)
+for gov in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+  echo performance > "$gov" 2>/dev/null || true
+done
+
 # -----------------------------
 # 3) Swap
 # -----------------------------
@@ -65,7 +70,7 @@ fi
 # -----------------------------
 log "🔧 Applying sysctl optimizations..."
 cat > /etc/sysctl.d/99-optimized-vps.conf <<'EOF'
-# File & socket backlog
+# File & backlog
 fs.file-max = 2097152
 net.core.somaxconn = 65535
 net.core.netdev_max_backlog = 250000
@@ -81,7 +86,7 @@ net.ipv4.tcp_tw_reuse = 1
 net.ipv4.tcp_timestamps = 1
 net.ipv4.tcp_sack = 1
 
-# Buffers tuned for low latency bursts (Minecraft/Wings)
+# Buffers (low-latency bursts)
 net.core.rmem_default = 262144
 net.core.rmem_max = 67108864
 net.core.wmem_default = 262144
@@ -96,7 +101,7 @@ net.ipv4.tcp_max_tw_buckets = 2000000
 # IPv6 forwarding (Docker/Wings overlays)
 net.ipv6.conf.all.forwarding = 1
 
-# Anti-DDoS sane defaults
+# Anti-DDoS sysctls
 net.ipv4.conf.all.accept_redirects = 0
 net.ipv4.conf.default.accept_redirects = 0
 net.ipv4.conf.all.send_redirects = 0
@@ -117,7 +122,7 @@ net.ipv6.conf.default.accept_source_route = 0
 vm.swappiness = 10
 vm.vfs_cache_pressure = 50
 
-# Conntrack table (handle more connections under load)
+# Conntrack scale
 net.netfilter.nf_conntrack_max = 262144
 EOF
 sysctl --system
@@ -125,15 +130,15 @@ sysctl --system
 # -----------------------------
 # 5) Disable Transparent Huge Pages (THP)
 # -----------------------------
-log "🛑 Disabling Transparent Huge Pages (for JVM stability)..."
+log "🛑 Disabling Transparent Huge Pages..."
 cat > /etc/systemd/system/disable-thp.service <<'EOF'
 [Unit]
 Description=Disable Transparent Huge Pages
 After=sysinit.target local-fs.target
 [Service]
 Type=oneshot
-ExecStart=/bin/bash -c 'echo never > /sys/kernel/mm/transparent_hugepage/enabled'
-ExecStart=/bin/bash -c 'echo never > /sys/kernel/mm/transparent_hugepage/defrag'
+ExecStart=/bin/bash -c "echo never > /sys/kernel/mm/transparent_hugepage/enabled"
+ExecStart=/bin/bash -c "echo never > /sys/kernel/mm/transparent_hugepage/defrag"
 [Install]
 WantedBy=multi-user.target
 EOF
@@ -148,9 +153,18 @@ systemctl enable --now tuned || true
 tuned-adm profile latency-performance || true
 
 # -----------------------------
-# 7) fq_codel on interfaces (reduce bufferbloat)
+# 7) fq_codel service
 # -----------------------------
-log "🌊 Applying fq_codel on all non-virtual interfaces..."
+log "🌊 Creating fq_codel service..."
+cat > /usr/local/bin/apply-fqcodel.sh <<'EOS'
+#!/bin/bash
+IFACES=$(ip -o link show | awk -F": " "{print \$2}" | grep -vE "lo|docker|veth|br-|virbr|vmnet|tap|tun")
+for IFACE in $IFACES; do
+  tc qdisc replace dev "$IFACE" root fq_codel || true
+done
+EOS
+chmod +x /usr/local/bin/apply-fqcodel.sh
+
 cat > /etc/systemd/system/qdisc-fqcodel.service <<'EOF'
 [Unit]
 Description=Apply fq_codel qdisc to interfaces
@@ -158,15 +172,11 @@ After=network-online.target
 Wants=network-online.target
 [Service]
 Type=oneshot
-ExecStart=/bin/bash -c '
-IFACES=$(ip -o link show | awk -F": " "{print \$2}" | grep -vE "lo|docker|veth|br-|virbr|vmnet|tap|tun");
-for IFACE in $IFACES; do
-  tc qdisc replace dev "$IFACE" root fq_codel || true
-done
-'
+ExecStart=/usr/local/bin/apply-fqcodel.sh
 [Install]
 WantedBy=multi-user.target
 EOF
+
 systemctl daemon-reload
 systemctl enable --now qdisc-fqcodel.service
 
@@ -186,7 +196,7 @@ ufw allow 25565/tcp comment 'Minecraft TCP'
 ufw allow 25565/udp comment 'Minecraft UDP'
 ufw --force enable
 
-log "🚨 Configuring Fail2Ban (SSH)..."
+log "🚨 Configuring Fail2Ban..."
 cat > /etc/fail2ban/jail.local <<'EOF'
 [DEFAULT]
 bantime = 1h
@@ -200,11 +210,16 @@ port = ssh
 filter = sshd
 logpath = /var/log/auth.log
 backend = systemd
+
+[nginx-http-auth]
+enabled = true
+port = http,https
+logpath = /var/log/nginx/error.log
 EOF
 systemctl enable --now fail2ban
 
 # -----------------------------
-# 9) ip6tables rules (anti-DDoS + Minecraft UDP limit)
+# 9) ip6tables rules (IPv6 anti-DDoS + Minecraft)
 # -----------------------------
 log "🌐 Applying ip6tables rules..."
 ip6tables -F || true
@@ -213,31 +228,31 @@ ip6tables -P INPUT DROP
 ip6tables -P FORWARD DROP
 ip6tables -P OUTPUT ACCEPT
 
-# Allow loopback & established
 ip6tables -A INPUT -i lo -j ACCEPT
 ip6tables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-
-# Essential ICMPv6 rate-limited
 ip6tables -A INPUT -p icmpv6 -m limit --limit 20/second --limit-burst 40 -j ACCEPT
-
-# TCP services
 ip6tables -A INPUT -p tcp -m multiport --dports 22,80,443,8080 -j ACCEPT
-
-# Minecraft UDP 25565 rate-limit (balanced)
 ip6tables -A INPUT -p udp --dport 25565 -m limit --limit 300/second --limit-burst 600 -j ACCEPT
-
-# Drop invalid
 ip6tables -A INPUT -m conntrack --ctstate INVALID -j DROP
 
-# Persist rules
 ip6tables-save > /etc/iptables/rules.v6
+
+# Minimal IPv4 persistence so IPv4 won’t break if present (UFW manages v4 policy)
+iptables -F || true
+iptables -X || true
+iptables -P INPUT ACCEPT
+iptables -P FORWARD ACCEPT
+iptables -P OUTPUT ACCEPT
 iptables-save > /etc/iptables/rules.v4
+
 systemctl enable --now netfilter-persistent || true
 
 # -----------------------------
-# 10) Docker installation & optimization
+# 10) Docker (install & optimize)
 # -----------------------------
 log "🐳 Installing and optimizing Docker..."
+
+# Install Docker repo & packages if not present
 if ! command -v docker >/dev/null 2>&1; then
   install -m 0755 -d /etc/apt/keyrings
   curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
@@ -247,6 +262,7 @@ if ! command -v docker >/dev/null 2>&1; then
   apt-get install -y docker-ce docker-ce-cli containerd.io
 fi
 
+# Docker daemon optimization (IPv6-ready, log rotation)
 mkdir -p /etc/docker
 cat > /etc/docker/daemon.json <<'EOF'
 {
@@ -260,7 +276,9 @@ cat > /etc/docker/daemon.json <<'EOF'
   "iptables": true
 }
 EOF
+
 systemctl enable --now docker
+systemctl restart docker || true
 
 # -----------------------------
 # 11) Limits & PAM
@@ -290,7 +308,6 @@ cat > /etc/systemd/system/nic-tuning.service <<'EOF'
 Description=NIC tuning (queues & offloads)
 After=network-online.target
 Wants=network-online.target
-
 [Service]
 Type=oneshot
 ExecStart=/bin/bash -c '
@@ -301,18 +318,17 @@ for IFACE in $IFACES; do
   ethtool -K "$IFACE" tso off gso off gro off lro off 2>/dev/null || true
 done
 '
-
 [Install]
 WantedBy=multi-user.target
 EOF
+
 systemctl daemon-reload
 systemctl enable --now nic-tuning.service
 
 # -----------------------------
 # 13) Minecraft low-ping ops tips (comments)
 # -----------------------------
-# 💡 Minecraft JVM flags (Aikar recommended):
-# Example for 4G allocation (leave 1–2G for OS/Docker):
+# 💡 JVM flags (Aikar recommended), example for 4G allocation:
 # java -Xms4G -Xmx4G -XX:+UseG1GC -XX:+ParallelRefProcEnabled \
 # -XX:MaxGCPauseMillis=200 -XX:+UnlockExperimentalVMOptions \
 # -XX:+DisableExplicitGC -XX:+AlwaysPreTouch -XX:G1NewSizePercent=30 \
@@ -323,7 +339,6 @@ systemctl enable --now nic-tuning.service
 # -XX:SurvivorRatio=32 -XX:+PerfDisableSharedMem -XX:MaxTenuringThreshold=1 \
 # -Dusing.aikars.flags=https://mcflags.emc.gs -Daikars.new.flags=true \
 # -jar server.jar nogui
-#
 # 🔭 View-distance: 8–10 (survival), 6–8 (large player counts)
 # 🌐 IPv6 ready via sysctl forwarding + ip6tables rules
 # 🛡️ UDP rate limiting for 25565 applied to reduce flood impact
